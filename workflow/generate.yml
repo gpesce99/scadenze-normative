@@ -1,0 +1,40 @@
+name: Genera dashboard scadenze
+
+on:
+  schedule:
+    # Ogni giorno alle 08:00 ora italiana (06:00 UTC in estate, 07:00 in inverno)
+    # Usiamo 06:00 UTC come compromesso — aggiusta se vuoi l'orario esatto
+    - cron: "0 6 * * *"
+  workflow_dispatch:  # consente di avviare manualmente dal tab Actions
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Genera index.html
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DEADLINES_DB_ID: ${{ secrets.NOTION_DEADLINES_DB_ID }}
+          NOTION_CLIENTS_DB_ID: ${{ secrets.NOTION_CLIENTS_DB_ID }}
+        run: python generate.py
+
+      - name: Commit e push index.html
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git diff --staged --quiet || git commit -m "chore: aggiorna dashboard $(date '+%d/%m/%Y %H:%M')"
+          git push
