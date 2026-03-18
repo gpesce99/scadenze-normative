@@ -98,7 +98,7 @@ def load_clients():
     clients = {}
     for p in pages:
         # Adatta "Nome" al nome reale della proprietà titolo nel tuo DB clienti
-        name = prop(p, "Nome azienda", "title") or prop(p, "Name", "title")
+        name = prop(p, "Nome", "title") or prop(p, "Name", "title")
         clients[p["id"].replace("-", "")] = name
         clients[p["id"]] = name
     return clients
@@ -122,7 +122,7 @@ def load_deadlines(clients):
         if days_left < 0:
             continue  # già scaduta, salta
 
-        tipo = prop(p, "Tipo", "select") or "Normativa"
+        tipo = prop(p, "TIpo", "select") or "Normativa"
         client_ids = prop(p, "Cliente", "relation")
         client_name = ""
         for cid in client_ids:
@@ -145,6 +145,12 @@ def load_deadlines(clients):
 
     items.sort(key=lambda x: x["days_left"])
     return items
+
+MESI_IT = {1:"gennaio",2:"febbraio",3:"marzo",4:"aprile",5:"maggio",6:"giugno",
+           7:"luglio",8:"agosto",9:"settembre",10:"ottobre",11:"novembre",12:"dicembre"}
+
+def format_date_it(d):
+    return f"{d.day} {MESI_IT[d.month]} {d.year}"
 
 def urgency(days):
     if days <= 30:
@@ -181,16 +187,17 @@ def item_html(item):
     if item["note"]:
         meta_parts.append(item["note"][:60] + ("…" if len(item["note"]) > 60 else ""))
     meta = " — ".join(meta_parts) if meta_parts else "&nbsp;"
-    deadline_str = item["deadline"].strftime("%d %b %Y")
+    deadline_str = format_date_it(item["deadline"])
     url = item["notion_url"]
     link_open = f'<a href="{url}" target="_blank" style="text-decoration:none;color:inherit">' if url else "<div>"
     link_close = "</a>" if url else "</div>"
 
     return f"""
+    <div data-tipo="{tipo}" style="margin-bottom:6px">
     {link_open}
     <div style="display:grid;grid-template-columns:1fr auto;align-items:center;gap:12px;
                 padding:10px 12px;border-radius:8px;background:#f8f8f8;
-                border:0.5px solid #e0e0e0;margin-bottom:6px;cursor:pointer">
+                border:0.5px solid #e0e0e0;cursor:pointer">
       <div style="display:flex;align-items:center;gap:10px">
         <div style="width:32px;height:32px;border-radius:6px;display:flex;align-items:center;
                     justify-content:center;font-size:14px;flex-shrink:0;
@@ -210,7 +217,8 @@ def item_html(item):
         <div style="font-size:11px;color:#666;margin-top:2px">{deadline_str}</div>
       </div>
     </div>
-    {link_close}"""
+    {link_close}
+    </div>"""
 
 def section_html(label, dot_color, items):
     if not items:
@@ -219,7 +227,7 @@ def section_html(label, dot_color, items):
     dot_hex = dot_map.get(dot_color, "#888")
     items_html = "\n".join(item_html(i) for i in items)
     return f"""
-    <div style="margin-top:14px">
+    <div data-section="{dot_color}" style="margin-top:14px">
       <div style="font-size:11px;font-weight:500;color:#888;text-transform:uppercase;
                   letter-spacing:.05em;margin-bottom:8px;display:flex;align-items:center;gap:6px">
         <span style="width:6px;height:6px;border-radius:50%;background:{dot_hex};display:inline-block"></span>
@@ -230,7 +238,7 @@ def section_html(label, dot_color, items):
 
 def build_html(items):
     today = date.today()
-    today_str = today.strftime("%-d %B %Y")
+    today_str = format_date_it(today)
 
     urgent  = [i for i in items if i["days_left"] <= 30]
     soon    = [i for i in items if 30 < i["days_left"] <= 90]
