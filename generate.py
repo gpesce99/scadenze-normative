@@ -10,6 +10,7 @@ Variabili d'ambiente richieste:
 
 import os
 import json
+import sys
 import urllib.request
 import urllib.error
 from datetime import date, datetime
@@ -59,8 +60,13 @@ def notion_request(path, payload=None):
         },
         method="POST" if payload else "GET",
     )
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"❌ Notion API error {e.code} on {path}: {body}", file=sys.stderr)
+        raise
 
 def query_database(db_id, filter_obj=None):
     """Recupera tutte le pagine di un database (gestisce la paginazione)."""
@@ -119,11 +125,8 @@ def load_clients():
 
 def load_deadlines(clients):
     today = date.today()
-    filter_obj = {
-        "property": "Data di scadenza",
-        "date": {"on_or_after": today.isoformat()},
-    }
-    pages = query_database(DEADLINES_DB_ID, filter_obj)
+    pages = query_database(DEADLINES_DB_ID)
+    print(f"   {len(pages)} pagine totali nel DB")
     fasi_raw = []
     for p in pages:
         raw_date = prop(p, "Data di scadenza", "date")
@@ -131,6 +134,8 @@ def load_deadlines(clients):
             continue
         deadline = date.fromisoformat(raw_date[:10])
         days_left = (deadline - today).days
+        if days_left < 0:
+            continue  # già scaduta
 
         nome_completo = prop(p, "Nome", "title") or prop(p, "Name", "title")
         if " - " in nome_completo:
@@ -441,7 +446,9 @@ def main():
     print("📅 Carico scadenze da Notion...")
     strumenti = load_deadlines(clients)
     n_fasi = sum(len(s["fasi"]) for s in strumenti)
-    print(f"   {len(strumenti)} strumenti ({n_fasi} fasi) trovati")
+    print(f"   {len(strumenti)} strumenti trovati, {n_fasi} fasi totali")
+    if not strumenti:
+        print("⚠️  Nessuno strumento trovato — controlla il nome del campo 'Data di scadenza' in Notion e che ci siano scadenze future", file=sys.stderr)
 
     print("🔨 Genero index.html...")
     html = build_html(strumenti)
