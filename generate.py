@@ -22,10 +22,12 @@ CLIENTS_DB_ID          = os.environ["NOTION_CLIENTS_DB_ID"]
 NOTION_VERSION         = "2022-06-28"
 
 TIPO_CONFIG = {
-    "Normativa":  {"color": "blue",   "icon": "📋"},
-    "Cliente":    {"color": "teal",   "icon": "⚡"},
-    "Incentivo":  {"color": "amber",  "icon": "💰"},
-    "Periodica":  {"color": "purple", "icon": "🔄"},
+    "Bando regionale":                {"color": "green",  "icon": "🏛️"},
+    "Incentivo nazionale":            {"color": "purple", "icon": "💰"},
+    "Obbligo normativo":              {"color": "blue",   "icon": "📋"},
+    "Direttiva UE":                   {"color": "teal",   "icon": "🇪🇺"},
+    "Norma tecnica / Certificazione": {"color": "amber",  "icon": "🏆"},
+    "Meccanismo di mercato":          {"color": "coral",  "icon": "📈"},
 }
 
 COLOR_CSS = {
@@ -33,7 +35,14 @@ COLOR_CSS = {
     "teal":   ("E1F5EE", "0F6E56", "085041"),
     "amber":  ("FAEEDA", "854F0B", "633806"),
     "purple": ("EEEDFE", "534AB7", "3C3489"),
+    "green":  ("EAF5E2", "3B6D11", "2A5009"),
+    "coral":  ("FDECEA", "C0392B", "922B21"),
 }
+
+AMBITI = [
+    "Efficienza energetica", "FER / Rinnovabili", "Emissioni / Carbon",
+    "Edilizia / Involucro", "Mercato energia", "Gestione energia", "Trasversale",
+]
 
 # ── Client Notion ─────────────────────────────────────────────────────────────
 
@@ -89,6 +98,11 @@ def prop(page, name, kind):
     if kind == "rich_text":
         items = p.get("rich_text", [])
         return "".join(t.get("plain_text", "") for t in items).strip()
+    if kind == "multi_select":
+        items = p.get("multi_select", [])
+        return [s["name"] for s in items]
+    if kind == "number":
+        return p.get("number")
     return ""
 
 # ── Logica principale ─────────────────────────────────────────────────────────
@@ -106,23 +120,31 @@ def load_clients():
 def load_deadlines(clients):
     today = date.today()
     filter_obj = {
-        "and": [
-            {"property": "Stato", "select": {"equals": "Attiva"}},
-            {"property": "Data scadenza", "date": {"is_not_empty": True}},
-        ]
+        "property": "Data di scadenza",
+        "date": {"on_or_after": today.isoformat()},
     }
     pages = query_database(DEADLINES_DB_ID, filter_obj)
-    items = []
+    fasi_raw = []
     for p in pages:
-        raw_date = prop(p, "Data scadenza", "date")
+        raw_date = prop(p, "Data di scadenza", "date")
         if not raw_date:
             continue
         deadline = date.fromisoformat(raw_date[:10])
         days_left = (deadline - today).days
-        if days_left < 0:
-            continue  # già scaduta, salta
 
-        tipo = prop(p, "TIpo", "select") or "Normativa"
+        nome_completo = prop(p, "Nome", "title") or prop(p, "Name", "title")
+        if " - " in nome_completo:
+            strumento, fase_label = nome_completo.split(" - ", 1)
+        else:
+            strumento, fase_label = nome_completo, ""
+
+        tipo = prop(p, "Tipo", "select") or "Obbligo normativo"
+        ambito = prop(p, "Ambito", "select") or ""
+        fase_field = prop(p, "Fase", "rich_text")
+        beneficiari = prop(p, "Beneficiari", "multi_select")
+        rif_normativo = prop(p, "Riferimento normativo", "rich_text")
+        note = prop(p, "Note", "rich_text")
+
         client_ids = prop(p, "Cliente", "relation")
         client_name = ""
         for cid in client_ids:
@@ -131,20 +153,42 @@ def load_deadlines(clients):
                 client_name = c
                 break
 
-        note = prop(p, "Note", "rich_text")
-
-        items.append({
-            "name":        prop(p, "Nome", "title") or prop(p, "Name", "title"),
-            "tipo":        tipo,
-            "cliente":     client_name,
-            "deadline":    deadline,
-            "days_left":   days_left,
-            "note":        note,
-            "notion_url":  p.get("url", ""),
+        fasi_raw.append({
+            "strumento":    strumento.strip(),
+            "fase_label":   fase_field or fase_label,
+            "tipo":         tipo,
+            "ambito":       ambito,
+            "cliente":      client_name,
+            "deadline":     deadline,
+            "days_left":    days_left,
+            "beneficiari":  beneficiari,
+            "rif_normativo": rif_normativo,
+            "note":         note,
+            "notion_url":   p.get("url", ""),
         })
 
-    items.sort(key=lambda x: x["days_left"])
-    return items
+    # Raggruppa per strumento
+    strumenti = {}
+    for fase in fasi_raw:
+        nome = fase["strumento"]
+        if nome not in strumenti:
+            strumenti[nome] = {
+                "strumento": nome,
+                "tipo":      fase["tipo"],
+                "ambito":    fase["ambito"],
+                "cliente":   fase["cliente"],
+                "fasi":      [],
+            }
+        strumenti[nome]["fasi"].append(fase)
+
+    # Per ogni strumento: ordina fasi e calcola scadenza più imminente
+    for s in strumenti.values():
+        s["fasi"].sort(key=lambda f: f["days_left"])
+        s["days_left"] = s["fasi"][0]["days_left"]
+        s["deadline"]  = s["fasi"][0]["deadline"]
+
+    strumenti_list = sorted(strumenti.values(), key=lambda s: s["days_left"])
+    return strumenti_list
 
 MESI_IT = {1:"gennaio",2:"febbraio",3:"marzo",4:"aprile",5:"maggio",6:"giugno",
            7:"luglio",8:"agosto",9:"settembre",10:"ottobre",11:"novembre",12:"dicembre"}
@@ -172,60 +216,92 @@ def badge_html(tipo):
         f'{cfg["icon"]} {tipo}</span>'
     )
 
-def item_html(item):
-    days = item["days_left"]
+def fase_row_html(fase):
+    days = fase["days_left"]
     color, _ = urgency(days)
     color_map = {"red": "#E24B4A", "amber": "#BA7517", "green": "#3B6D11"}
     hex_color = color_map[color]
-    tipo = item["tipo"]
+    deadline_str = format_date_it(fase["deadline"])
+    label = fase["fase_label"] or "Scadenza"
+    url = fase["notion_url"]
+    link_open  = f'<a href="{url}" target="_blank" style="text-decoration:none;color:inherit">' if url else ""
+    link_close = "</a>" if url else ""
+
+    bene = ", ".join(fase["beneficiari"]) if fase["beneficiari"] else ""
+    rif  = fase["rif_normativo"]
+    note = fase["note"]
+
+    extra_parts = []
+    if bene:
+        extra_parts.append(f'<span style="color:#888">Beneficiari:</span> {bene}')
+    if rif:
+        extra_parts.append(f'<span style="color:#888">Rif.:</span> {rif}')
+    if note:
+        extra_parts.append(f'<span style="color:#888">Note:</span> {note}')
+    extra_html = ("<br>".join(extra_parts)) if extra_parts else ""
+
+    return f"""
+      <div style="padding:8px 12px;border-top:0.5px solid #e8e8e8;background:#fafafa">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+          <div style="font-size:12px;font-weight:500;color:#1a1a1a">{link_open}{label}{link_close}</div>
+          <div style="text-align:right;flex-shrink:0">
+            <span style="font-size:14px;font-weight:500;color:{hex_color}">{days}</span>
+            <span style="font-size:10px;color:#888"> gg</span>
+            <div style="font-size:10px;color:#666">{deadline_str}</div>
+          </div>
+        </div>
+        {f'<div style="font-size:11px;color:#555;margin-top:4px;line-height:1.5">{extra_html}</div>' if extra_html else ""}
+      </div>"""
+
+def strumento_html(s):
+    days = s["days_left"]
+    color, _ = urgency(days)
+    color_map = {"red": "#E24B4A", "amber": "#BA7517", "green": "#3B6D11"}
+    hex_color = color_map[color]
+    tipo = s["tipo"]
+    ambito = s["ambito"]
     cfg = TIPO_CONFIG.get(tipo, {"color": "blue", "icon": "📋"})
     col = cfg["color"]
     bg, border, _ = COLOR_CSS.get(col, COLOR_CSS["blue"])
-    meta_parts = []
-    if item["cliente"]:
-        meta_parts.append(item["cliente"])
-    if item["note"]:
-        meta_parts.append(item["note"][:60] + ("…" if len(item["note"]) > 60 else ""))
-    meta = " — ".join(meta_parts) if meta_parts else "&nbsp;"
-    deadline_str = format_date_it(item["deadline"])
-    url = item["notion_url"]
-    link_open = f'<a href="{url}" target="_blank" style="text-decoration:none;color:inherit">' if url else "<div>"
-    link_close = "</a>" if url else "</div>"
+    deadline_str = format_date_it(s["deadline"])
+    n_fasi = len(s["fasi"])
+    fasi_label = f"{n_fasi} {'fase' if n_fasi == 1 else 'fasi'}"
+    fasi_html = "\n".join(fase_row_html(f) for f in s["fasi"])
 
     return f"""
-    <div data-tipo="{tipo}" style="margin-bottom:6px">
-    {link_open}
-    <div style="display:grid;grid-template-columns:1fr auto;align-items:center;gap:12px;
-                padding:10px 12px;border-radius:8px;background:#f8f8f8;
-                border:0.5px solid #e0e0e0;cursor:pointer">
-      <div style="display:flex;align-items:center;gap:10px">
-        <div style="width:32px;height:32px;border-radius:6px;display:flex;align-items:center;
-                    justify-content:center;font-size:14px;flex-shrink:0;
-                    background:#{bg};border:0.5px solid #{border}">
-          {cfg['icon']}
-        </div>
-        <div>
-          <div style="font-size:13px;font-weight:500;color:#1a1a1a;margin-bottom:2px">
-            {item['name']}{badge_html(tipo)}
+    <div data-ambito="{ambito}" class="card-strumento" style="margin-bottom:6px;border-radius:8px;border:0.5px solid #e0e0e0;overflow:hidden">
+      <div onclick="toggleCard(this)" style="display:grid;grid-template-columns:1fr auto;align-items:center;gap:12px;
+                  padding:10px 12px;background:#f8f8f8;cursor:pointer">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="width:32px;height:32px;border-radius:6px;display:flex;align-items:center;
+                      justify-content:center;font-size:14px;flex-shrink:0;
+                      background:#{bg};border:0.5px solid #{border}">
+            {cfg['icon']}
           </div>
-          <div style="font-size:11px;color:#666">{meta}</div>
+          <div>
+            <div style="font-size:13px;font-weight:500;color:#1a1a1a;margin-bottom:2px">
+              {s['strumento']}{badge_html(tipo)}
+            </div>
+            <div style="font-size:11px;color:#888">{fasi_label}</div>
+          </div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:20px;font-weight:500;line-height:1;color:{hex_color}">{days}</div>
+          <div style="font-size:10px;color:#888">giorni</div>
+          <div style="font-size:11px;color:#666;margin-top:2px">{deadline_str}</div>
         </div>
       </div>
-      <div style="text-align:right;flex-shrink:0">
-        <div style="font-size:20px;font-weight:500;line-height:1;color:{hex_color}">{days}</div>
-        <div style="font-size:10px;color:#888">giorni</div>
-        <div style="font-size:11px;color:#666;margin-top:2px">{deadline_str}</div>
+      <div class="fasi-panel" style="display:none">
+        {fasi_html}
       </div>
-    </div>
-    {link_close}
     </div>"""
 
-def section_html(label, dot_color, items):
-    if not items:
+def section_html(label, dot_color, strumenti):
+    if not strumenti:
         return ""
     dot_map = {"red": "#E24B4A", "amber": "#EF9F27", "green": "#639922"}
     dot_hex = dot_map.get(dot_color, "#888")
-    items_html = "\n".join(item_html(i) for i in items)
+    cards_html = "\n".join(strumento_html(s) for s in strumenti)
     return f"""
     <div data-section="{dot_color}" style="margin-top:14px">
       <div style="font-size:11px;font-weight:500;color:#888;text-transform:uppercase;
@@ -233,29 +309,30 @@ def section_html(label, dot_color, items):
         <span style="width:6px;height:6px;border-radius:50%;background:{dot_hex};display:inline-block"></span>
         {label}
       </div>
-      {items_html}
+      {cards_html}
     </div>"""
 
-def build_html(items):
+def build_html(strumenti_list):
     today = date.today()
     today_str = format_date_it(today)
 
-    urgent  = [i for i in items if i["days_left"] <= 30]
-    soon    = [i for i in items if 30 < i["days_left"] <= 90]
-    planned = [i for i in items if i["days_left"] > 90]
+    urgent  = [s for s in strumenti_list if s["days_left"] <= 30]
+    soon    = [s for s in strumenti_list if 30 < s["days_left"] <= 90]
+    planned = [s for s in strumenti_list if s["days_left"] > 90]
 
     counts = {
-        "urgent": len(urgent),
-        "soon":   len(soon),
+        "urgent":  len(urgent),
+        "soon":    len(soon),
         "planned": len(planned),
-        "total":   len(items),
+        "total":   len(strumenti_list),
     }
 
-    all_tipos = sorted({i["tipo"] for i in items})
+    ambiti_presenti = {s["ambito"] for s in strumenti_list if s["ambito"]}
     filter_chips = '<div class="chip active" onclick="filter(\'tutte\',this)">Tutte</div>\n'
-    for t in all_tipos:
-        cfg = TIPO_CONFIG.get(t, {"icon": ""})
-        filter_chips += f'<div class="chip" onclick="filter(\'{t}\',this)">{cfg["icon"]} {t}</div>\n'
+    for a in AMBITI:
+        if a in ambiti_presenti:
+            safe = a.replace("'", "\\'")
+            filter_chips += f'<div class="chip" onclick="filter(\'{safe}\',this)">{a}</div>\n'
 
     sections_html = (
         section_html("Urgenti — entro 30 giorni", "red", urgent) +
@@ -263,7 +340,7 @@ def build_html(items):
         section_html("Pianificate — oltre 90 giorni", "green", planned)
     )
 
-    if not items:
+    if not strumenti_list:
         sections_html = '<p style="color:#888;font-size:13px;padding:12px 0">Nessuna scadenza attiva.</p>'
 
     generated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
@@ -292,10 +369,10 @@ def build_html(items):
   .filters {{ display: flex; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }}
   .chip {{ font-size: 12px; padding: 4px 12px; border-radius: 99px;
            border: 0.5px solid #ccc; background: #fff; color: #555;
-           cursor: pointer; transition: all .15s; }}
+           cursor: pointer; transition: all .15s; user-select: none; }}
   .chip.active {{ background: #0f1c2e; color: #fff; border-color: #0f1c2e; }}
   .footer {{ font-size: 11px; color: #aaa; text-align: center; padding: 16px 0; }}
-  a:hover > div {{ border-color: #999 !important; }}
+  .card-strumento > div:first-child:hover {{ background: #f0f0f0 !important; }}
   @media (max-width: 480px) {{
     .stats {{ grid-template-columns: repeat(2,1fr); }}
     .hero {{ padding: 14px 16px 12px; }}
@@ -317,7 +394,7 @@ def build_html(items):
     <div class="stat red"><div class="n">{counts['urgent']}</div><div class="l">Urgenti &lt;30gg</div></div>
     <div class="stat amber"><div class="n">{counts['soon']}</div><div class="l">Prossime 30–90gg</div></div>
     <div class="stat"><div class="n">{counts['planned']}</div><div class="l">Pianificate</div></div>
-    <div class="stat"><div class="n">{counts['total']}</div><div class="l">Totale attive</div></div>
+    <div class="stat"><div class="n">{counts['total']}</div><div class="l">Totale strumenti</div></div>
   </div>
 </div>
 
@@ -332,14 +409,21 @@ def build_html(items):
 </div>
 
 <script>
-function filter(tipo, el) {{
-  document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+function toggleCard(header) {{
+  var panel = header.nextElementSibling;
+  var isOpen = panel.style.display !== 'none';
+  document.querySelectorAll('.fasi-panel').forEach(function(p) {{ p.style.display = 'none'; }});
+  if (!isOpen) panel.style.display = '';
+}}
+
+function filter(ambito, el) {{
+  document.querySelectorAll('.chip').forEach(function(c) {{ c.classList.remove('active'); }});
   el.classList.add('active');
-  document.querySelectorAll('[data-tipo]').forEach(item => {{
-    item.style.display = (tipo === 'tutte' || item.dataset.tipo === tipo) ? '' : 'none';
+  document.querySelectorAll('.card-strumento').forEach(function(card) {{
+    card.style.display = (ambito === 'tutte' || card.dataset.ambito === ambito) ? '' : 'none';
   }});
-  document.querySelectorAll('[data-section]').forEach(sec => {{
-    const vis = [...sec.querySelectorAll('[data-tipo]')].some(i => i.style.display !== 'none');
+  document.querySelectorAll('[data-section]').forEach(function(sec) {{
+    var vis = [...sec.querySelectorAll('.card-strumento')].some(function(c) {{ return c.style.display !== 'none'; }});
     sec.style.display = vis ? '' : 'none';
   }});
 }}
@@ -355,11 +439,12 @@ def main():
     print(f"   {len(clients)//2} clienti trovati")
 
     print("📅 Carico scadenze da Notion...")
-    items = load_deadlines(clients)
-    print(f"   {len(items)} scadenze attive")
+    strumenti = load_deadlines(clients)
+    n_fasi = sum(len(s["fasi"]) for s in strumenti)
+    print(f"   {len(strumenti)} strumenti ({n_fasi} fasi) trovati")
 
     print("🔨 Genero index.html...")
-    html = build_html(items)
+    html = build_html(strumenti)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(html)
     print("✅ index.html generato con successo")
