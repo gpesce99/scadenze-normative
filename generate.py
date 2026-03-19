@@ -130,14 +130,18 @@ def load_deadlines(clients):
     fasi_raw = []
     for p in pages:
         raw_date = prop(p, "Data di scadenza", "date")
-        if not raw_date:
-            continue
-        deadline = date.fromisoformat(raw_date[:10])
-        days_left = (deadline - today).days
-        if days_left < 0:
-            continue  # già scaduta
+        if raw_date:
+            deadline = date.fromisoformat(raw_date[:10])
+            days_left = (deadline - today).days
+            if days_left < 0:
+                continue  # già scaduta, salta
+        else:
+            deadline = None
+            days_left = None  # senza data: includi comunque
 
         nome_completo = prop(p, "Nome", "title") or prop(p, "Name", "title")
+        if not nome_completo:
+            continue
         if " - " in nome_completo:
             strumento, fase_label = nome_completo.split(" - ", 1)
         else:
@@ -159,17 +163,17 @@ def load_deadlines(clients):
                 break
 
         fasi_raw.append({
-            "strumento":    strumento.strip(),
-            "fase_label":   fase_field or fase_label,
-            "tipo":         tipo,
-            "ambito":       ambito,
-            "cliente":      client_name,
-            "deadline":     deadline,
-            "days_left":    days_left,
-            "beneficiari":  beneficiari,
+            "strumento":     strumento.strip(),
+            "fase_label":    fase_field or fase_label,
+            "tipo":          tipo,
+            "ambito":        ambito,
+            "cliente":       client_name,
+            "deadline":      deadline,
+            "days_left":     days_left,
+            "beneficiari":   beneficiari,
             "rif_normativo": rif_normativo,
-            "note":         note,
-            "notion_url":   p.get("url", ""),
+            "note":          note,
+            "notion_url":    p.get("url", ""),
         })
 
     # Raggruppa per strumento
@@ -186,14 +190,22 @@ def load_deadlines(clients):
             }
         strumenti[nome]["fasi"].append(fase)
 
-    # Per ogni strumento: ordina fasi e calcola scadenza più imminente
+    # Per ogni strumento: fasi con data prima (per days_left), senza data in fondo
     for s in strumenti.values():
-        s["fasi"].sort(key=lambda f: f["days_left"])
-        s["days_left"] = s["fasi"][0]["days_left"]
-        s["deadline"]  = s["fasi"][0]["deadline"]
+        con_data    = sorted([f for f in s["fasi"] if f["days_left"] is not None], key=lambda f: f["days_left"])
+        senza_data  = [f for f in s["fasi"] if f["days_left"] is None]
+        s["fasi"]   = con_data + senza_data
+        if con_data:
+            s["days_left"] = con_data[0]["days_left"]
+            s["deadline"]  = con_data[0]["deadline"]
+        else:
+            s["days_left"] = None
+            s["deadline"]  = None
 
-    strumenti_list = sorted(strumenti.values(), key=lambda s: s["days_left"])
-    return strumenti_list
+    # Strumenti con data ordinati per days_left, senza data in fondo
+    con_data   = sorted([s for s in strumenti.values() if s["days_left"] is not None], key=lambda s: s["days_left"])
+    senza_data = [s for s in strumenti.values() if s["days_left"] is None]
+    return con_data + senza_data
 
 MESI_IT = {1:"gennaio",2:"febbraio",3:"marzo",4:"aprile",5:"maggio",6:"giugno",
            7:"luglio",8:"agosto",9:"settembre",10:"ottobre",11:"novembre",12:"dicembre"}
@@ -202,6 +214,8 @@ def format_date_it(d):
     return f"{d.day} {MESI_IT[d.month]} {d.year}"
 
 def urgency(days):
+    if days is None:
+        return "gray", "Nessuna scadenza"
     if days <= 30:
         return "red", "Urgente"
     if days <= 90:
@@ -224,9 +238,11 @@ def badge_html(tipo):
 def fase_row_html(fase):
     days = fase["days_left"]
     color, _ = urgency(days)
-    color_map = {"red": "#E24B4A", "amber": "#BA7517", "green": "#3B6D11"}
+    color_map = {"red": "#E24B4A", "amber": "#BA7517", "green": "#3B6D11", "gray": "#888"}
     hex_color = color_map[color]
-    deadline_str = format_date_it(fase["deadline"])
+    deadline_str = format_date_it(fase["deadline"]) if fase["deadline"] else "Nessuna scadenza"
+    days_str     = str(days) if days is not None else "—"
+    gg_html      = '<span style="font-size:10px;color:#888"> gg</span>' if days is not None else ""
     label = fase["fase_label"] or "Scadenza"
     url = fase["notion_url"]
     link_open  = f'<a href="{url}" target="_blank" style="text-decoration:none;color:inherit">' if url else ""
@@ -250,8 +266,7 @@ def fase_row_html(fase):
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
           <div style="font-size:12px;font-weight:500;color:#1a1a1a">{link_open}{label}{link_close}</div>
           <div style="text-align:right;flex-shrink:0">
-            <span style="font-size:14px;font-weight:500;color:{hex_color}">{days}</span>
-            <span style="font-size:10px;color:#888"> gg</span>
+            <span style="font-size:14px;font-weight:500;color:{hex_color}">{days_str}</span>{gg_html}
             <div style="font-size:10px;color:#666">{deadline_str}</div>
           </div>
         </div>
@@ -261,14 +276,16 @@ def fase_row_html(fase):
 def strumento_html(s):
     days = s["days_left"]
     color, _ = urgency(days)
-    color_map = {"red": "#E24B4A", "amber": "#BA7517", "green": "#3B6D11"}
+    color_map = {"red": "#E24B4A", "amber": "#BA7517", "green": "#3B6D11", "gray": "#888"}
     hex_color = color_map[color]
     tipo = s["tipo"]
     ambito = s["ambito"]
     cfg = TIPO_CONFIG.get(tipo, {"color": "blue", "icon": "📋"})
     col = cfg["color"]
     bg, border, _ = COLOR_CSS.get(col, COLOR_CSS["blue"])
-    deadline_str = format_date_it(s["deadline"])
+    deadline_str = format_date_it(s["deadline"]) if s["deadline"] else "Nessuna scadenza"
+    days_str     = str(days) if days is not None else "—"
+    gg_html      = '<div style="font-size:10px;color:#888">giorni</div>' if days is not None else ""
     n_fasi = len(s["fasi"])
     fasi_label = f"{n_fasi} {'fase' if n_fasi == 1 else 'fasi'}"
     fasi_html = "\n".join(fase_row_html(f) for f in s["fasi"])
@@ -291,8 +308,8 @@ def strumento_html(s):
           </div>
         </div>
         <div style="text-align:right;flex-shrink:0">
-          <div style="font-size:20px;font-weight:500;line-height:1;color:{hex_color}">{days}</div>
-          <div style="font-size:10px;color:#888">giorni</div>
+          <div style="font-size:20px;font-weight:500;line-height:1;color:{hex_color}">{days_str}</div>
+          {gg_html}
           <div style="font-size:11px;color:#666;margin-top:2px">{deadline_str}</div>
         </div>
       </div>
@@ -304,7 +321,7 @@ def strumento_html(s):
 def section_html(label, dot_color, strumenti):
     if not strumenti:
         return ""
-    dot_map = {"red": "#E24B4A", "amber": "#EF9F27", "green": "#639922"}
+    dot_map = {"red": "#E24B4A", "amber": "#EF9F27", "green": "#639922", "gray": "#aaa"}
     dot_hex = dot_map.get(dot_color, "#888")
     cards_html = "\n".join(strumento_html(s) for s in strumenti)
     return f"""
@@ -321,9 +338,10 @@ def build_html(strumenti_list):
     today = date.today()
     today_str = format_date_it(today)
 
-    urgent  = [s for s in strumenti_list if s["days_left"] <= 30]
-    soon    = [s for s in strumenti_list if 30 < s["days_left"] <= 90]
-    planned = [s for s in strumenti_list if s["days_left"] > 90]
+    urgent   = [s for s in strumenti_list if s["days_left"] is not None and s["days_left"] <= 30]
+    soon     = [s for s in strumenti_list if s["days_left"] is not None and 30 < s["days_left"] <= 90]
+    planned  = [s for s in strumenti_list if s["days_left"] is not None and s["days_left"] > 90]
+    no_date  = [s for s in strumenti_list if s["days_left"] is None]
 
     counts = {
         "urgent":  len(urgent),
@@ -342,7 +360,8 @@ def build_html(strumenti_list):
     sections_html = (
         section_html("Urgenti — entro 30 giorni", "red", urgent) +
         section_html("Prossime — 30 a 90 giorni", "amber", soon) +
-        section_html("Pianificate — oltre 90 giorni", "green", planned)
+        section_html("Pianificate — oltre 90 giorni", "green", planned) +
+        section_html("Senza scadenza", "gray", no_date)
     )
 
     if not strumenti_list:
